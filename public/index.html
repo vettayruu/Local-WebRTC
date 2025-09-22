@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebRTC 摄像头流</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        
+        h1 {
+            color: #333;
+            text-align: center;
+        }
+        
+        .video-container {
+            position: relative;
+            margin: 20px auto;
+            background: #eee;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        
+        video {
+            width: 100%;
+            display: block;
+            background: #000;
+        }
+        
+        .controls {
+            display: flex;
+            justify-content: center;
+            gap: 10px;
+            margin: 15px 0;
+        }
+        
+        button {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 4px;
+            background: #4285f4;
+            color: white;
+            font-weight: bold;
+            cursor: pointer;
+            transition: background 0.3s;
+        }
+        
+        button:hover {
+            background: #3367d6;
+        }
+        
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        
+        .status {
+            text-align: center;
+            margin-top: 15px;
+            padding: 10px;
+            border-radius: 4px;
+        }
+        
+        .connected {
+            background: #d4edda;
+            color: #155724;
+        }
+        
+        .disconnected {
+            background: #f8d7da;
+            color: #721c24;
+        }
+        
+        .connecting {
+            background: #fff3cd;
+            color: #856404;
+        }
+    </style>
+</head>
+<body>
+    <h1>WebRTC 相机流</h1>
+    
+    <div class="video-container">
+        <video id="video" autoplay playsinline></video>
+    </div>
+    
+    <div class="controls">
+        <button id="startButton">开始连接</button>
+        <button id="stopButton" disabled>停止连接</button>
+    </div>
+    
+    <div id="status" class="status disconnected">
+        未连接
+    </div>
+    
+    <script>
+        // 全局变量
+        let peerConnection;
+        let videoElement = document.getElementById('video');
+        let startButton = document.getElementById('startButton');
+        let stopButton = document.getElementById('stopButton');
+        let statusDiv = document.getElementById('status');
+        
+        // 设置按钮事件监听器
+        startButton.addEventListener('click', start);
+        stopButton.addEventListener('click', stop);
+        
+        // 开始WebRTC连接
+        async function start() {
+            try {
+                console.log("开始连接...");
+                updateStatus("connecting", "正在连接...");
+                
+                // 创建新的RTCPeerConnection
+                peerConnection = new RTCPeerConnection({
+                    iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+                });
+                
+                // 设置事件处理
+                peerConnection.addEventListener('track', gotRemoteStream);
+                peerConnection.addEventListener('iceconnectionstatechange', checkConnectionState);
+                
+                // 创建一个空的视频轨道来触发连接
+                const audioTrack = createEmptyAudioTrack();
+                const videoTrack = createEmptyVideoTrack({ width: 640, height: 480 });
+                const stream = new MediaStream([audioTrack, videoTrack]);
+                
+                // 添加轨道到PeerConnection
+                stream.getTracks().forEach(track => {
+                    peerConnection.addTrack(track, stream);
+                });
+                
+                // 创建offer
+                const offer = await peerConnection.createOffer();
+                await peerConnection.setLocalDescription(offer);
+                
+                // 发送offer到服务器
+                const response = await fetch('http://localhost:8080/offer', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        sdp: peerConnection.localDescription.sdp,
+                        type: peerConnection.localDescription.type
+                    })
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`服务器响应错误: ${response.status} ${response.statusText}`);
+                }
+                
+                // 获取应答
+                const answer = await response.json();
+                
+                // 设置远程描述
+                await peerConnection.setRemoteDescription(new RTCSessionDescription(answer));
+                
+                console.log("连接已建立");
+                startButton.disabled = true;
+                stopButton.disabled = false;
+                
+            } catch (e) {
+                console.error("连接错误:", e);
+                updateStatus("disconnected", `连接失败: ${e.message}`);
+                stop();
+            }
+        }
+        
+        // 停止WebRTC连接
+        function stop() {
+            if (peerConnection) {
+                peerConnection.close();
+                peerConnection = null;
+            }
+            
+            videoElement.srcObject = null;
+            startButton.disabled = false;
+            stopButton.disabled = true;
+            updateStatus("disconnected", "已断开连接");
+            console.log("连接已断开");
+        }
+        
+        // 处理远程流
+        function gotRemoteStream(e) {
+            if (e.track.kind === 'video') {
+                console.log("接收到远程视频流");
+                const remoteStream = new MediaStream();
+                remoteStream.addTrack(e.track);
+                videoElement.srcObject = remoteStream;
+                updateStatus("connected", "已连接");
+            }
+        }
+        
+        // 检查连接状态
+        function checkConnectionState() {
+            if (!peerConnection) return;
+            
+            console.log("ICE连接状态:", peerConnection.iceConnectionState);
+            
+            switch(peerConnection.iceConnectionState) {
+                case "connected":
+                case "completed":
+                    updateStatus("connected", "已连接");
+                    break;
+                case "disconnected":
+                case "failed":
+                    updateStatus("disconnected", "连接已断开");
+                    break;
+                case "checking":
+                    updateStatus("connecting", "正在连接...");
+                    break;
+            }
+        }
+        
+        // 更新状态显示
+        function updateStatus(state, message) {
+            statusDiv.className = `status ${state}`;
+            statusDiv.textContent = message;
+        }
+        
+        // 创建空的音频轨道
+        function createEmptyAudioTrack() {
+            const ctx = new AudioContext();
+            const oscillator = ctx.createOscillator();
+            const dst = oscillator.connect(ctx.createMediaStreamDestination());
+            oscillator.start();
+            const track = dst.stream.getAudioTracks()[0];
+            return Object.assign(track, { enabled: false });
+        }
+        
+        // 创建空的视频轨道
+        function createEmptyVideoTrack({ width, height }) {
+            const canvas = Object.assign(document.createElement('canvas'), { width, height });
+            const ctx = canvas.getContext('2d');
+            ctx.fillRect(0, 0, width, height);
+            
+            const stream = canvas.captureStream();
+            const track = stream.getVideoTracks()[0];
+            
+            return Object.assign(track, { enabled: false });
+        }
+        
+        // 页面关闭时清理资源
+        window.addEventListener('beforeunload', () => {
+            if (peerConnection) {
+                peerConnection.close();
+            }
+        });
+    </script>
+</body>
+</html>
+
